@@ -9,6 +9,13 @@ it reaches `1.0.0`.
 
 ### Added
 
+- **Credo** added as a dev/test dependency with `--strict` cleanliness.
+  Configuration in `.credo.exs` (default + a few project-specific
+  refinements). All current source passes `mix credo --strict` with
+  zero issues.
+
+### Added
+
 - **`PeerNet.NetworkMonitor`** behaviour + **`Polling`** default
   implementation. Notices when local IP set changes (e.g. WiFi
   switch) and notifies subscribers. Wires into Registry so a

@@ -49,7 +49,7 @@ defmodule PeerNet.Discovery.UDP.WireTest do
   describe "frame size" do
     test "every announce is exactly the same compact size" do
       a = Wire.encode(:crypto.strong_rand_bytes(32), 7100)
-      b = Wire.encode(:crypto.strong_rand_bytes(32), 65000)
+      b = Wire.encode(:crypto.strong_rand_bytes(32), 65_000)
       assert byte_size(a) == byte_size(b)
       # 4 magic + 1 version + 2 port + 32 pubkey = 39 bytes.
       assert byte_size(a) == 39

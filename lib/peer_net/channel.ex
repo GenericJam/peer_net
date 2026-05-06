@@ -39,7 +39,7 @@ defmodule PeerNet.Channel do
   trigger this — any actual occurrence is a bug, not a real attack).
   """
 
-  alias PeerNet.{Frame}
+  alias PeerNet.Frame
 
   @taglen 16
   @counter_max 0xFFFFFFFFFFFFFFFE
@@ -119,37 +119,37 @@ defmodule PeerNet.Channel do
   def decrypt(%CipherState{key: key, counter: counter} = cs, frame_body) do
     ct_len = byte_size(frame_body) - @taglen
 
-    cond do
-      ct_len < 0 ->
-        {:error, :bad_decrypt, cs}
-
-      true ->
-        <<ct::binary-size(ct_len), tag::binary-size(@taglen)>> = frame_body
-        nonce = noise_nonce(counter)
-
-        try do
-          case :crypto.crypto_one_time_aead(
-                 :chacha20_poly1305,
-                 key,
-                 nonce,
-                 ct,
-                 <<>>,
-                 tag,
-                 false
-               ) do
-            plaintext when is_binary(plaintext) ->
-              case safe_deserialise(plaintext) do
-                {:ok, term} -> {:ok, term, %{cs | counter: counter + 1}}
-                :error -> {:error, :invalid_term, cs}
-              end
-
-            _ ->
-              {:error, :bad_decrypt, cs}
-          end
-        rescue
-          _ -> {:error, :bad_decrypt, cs}
-        end
+    if ct_len < 0 do
+      {:error, :bad_decrypt, cs}
+    else
+      <<ct::binary-size(ct_len), tag::binary-size(@taglen)>> = frame_body
+      try_aead_decrypt(cs, key, counter, ct, tag)
     end
+  end
+
+  defp try_aead_decrypt(cs, key, counter, ct, tag) do
+    nonce = noise_nonce(counter)
+
+    case :crypto.crypto_one_time_aead(
+           :chacha20_poly1305,
+           key,
+           nonce,
+           ct,
+           <<>>,
+           tag,
+           false
+         ) do
+      plaintext when is_binary(plaintext) ->
+        case safe_deserialise(plaintext) do
+          {:ok, term} -> {:ok, term, %{cs | counter: counter + 1}}
+          :error -> {:error, :invalid_term, cs}
+        end
+
+      _ ->
+        {:error, :bad_decrypt, cs}
+    end
+  rescue
+    _ -> {:error, :bad_decrypt, cs}
   end
 
   defp noise_nonce(counter), do: <<0::32, counter::little-unsigned-64>>

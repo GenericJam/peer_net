@@ -145,7 +145,7 @@ defmodule PeerNet do
            fn ->
              # Wait for Acceptor to be reachable, then publish its port.
              port = wait_for_acceptor_port(acceptor_name(name))
-             apply(discovery_mod, :announce_self, [discovery_name(name), port])
+             discovery_mod.announce_self(discovery_name(name), port)
            end}
         ]
       else

@@ -128,19 +128,16 @@ defmodule PeerNet.Discovery.UDP do
   def handle_info({:peer_net_udp_packet, source_ip, bytes}, state) do
     case Wire.decode(bytes) do
       {:ok, %{pubkey: pubkey, port: port}} ->
-        cond do
-          pubkey == state.identity.public ->
-            # Self-loopback — drop silently.
-            {:noreply, state}
+        if pubkey == state.identity.public do
+          # Self-loopback — drop silently.
+          {:noreply, state}
+        else
+          send(
+            state.registry,
+            {:peer_discovered, pubkey, %{ip: source_ip, port: port, source: :udp}}
+          )
 
-          true ->
-            send(state.registry, {:peer_discovered, pubkey, %{
-              ip: source_ip,
-              port: port,
-              source: :udp
-            }})
-
-            {:noreply, state}
+          {:noreply, state}
         end
 
       :error ->

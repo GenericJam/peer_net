@@ -112,34 +112,25 @@ defmodule PeerNet.HandshakeTest do
   defp do_drive(_a, _ai, _b, _bi, _opts, 0), do: {:error, :stalled, :both}
 
   defp do_drive(a, a_in, b, b_in, opts, steps) do
-    if a.phase == :authenticated and b.phase == :authenticated do
+    if both_authenticated?(a, b) do
       {:ok, %{a: a, b: b}}
     else
-      case Handshake.step(a, a_in) do
-        {:error, reason, role} ->
-          {:error, reason, role}
-
-        {:ok, new_a, out_a} ->
-          out_a_for_b =
-            case opts do
-              %{forge: forge} -> forge.(out_a, :a)
-              _ -> out_a
-            end
-
-          case Handshake.step(b, b_in <> out_a_for_b) do
-            {:error, reason, role} ->
-              {:error, reason, role}
-
-            {:ok, new_b, out_b} ->
-              out_b_for_a =
-                case opts do
-                  %{forge: forge} -> forge.(out_b, :b)
-                  _ -> out_b
-                end
-
-              do_drive(new_a, out_b_for_a, new_b, <<>>, opts, steps - 1)
-          end
-      end
+      step_then_continue(a, a_in, b, b_in, opts, steps)
     end
   end
+
+  defp both_authenticated?(a, b),
+    do: a.phase == :authenticated and b.phase == :authenticated
+
+  defp step_then_continue(a, a_in, b, b_in, opts, steps) do
+    with {:ok, new_a, out_a} <- Handshake.step(a, a_in),
+         out_a_for_b = maybe_forge(opts, out_a, :a),
+         {:ok, new_b, out_b} <- Handshake.step(b, b_in <> out_a_for_b) do
+      out_b_for_a = maybe_forge(opts, out_b, :b)
+      do_drive(new_a, out_b_for_a, new_b, <<>>, opts, steps - 1)
+    end
+  end
+
+  defp maybe_forge(%{forge: forge}, bytes, side), do: forge.(bytes, side)
+  defp maybe_forge(_, bytes, _side), do: bytes
 end

@@ -188,25 +188,7 @@ defmodule PeerNet.Registry do
         {:noreply, state}
 
       {pubkey, monitors} ->
-        new_state = %{state | monitors: monitors}
-
-        new_state =
-          case Map.get(state.peers, pubkey) do
-            nil ->
-              new_state
-
-            entry ->
-              entry = %{entry | conn_pid: nil, status: :disconnected}
-              new_state = put_in(new_state.peers[pubkey], entry)
-
-              # If we have a recent address and the peer is still
-              # trusted, schedule a redial. The Connection terminating
-              # is a normal lifecycle event — don't tear down the peer
-              # record itself, just mark it disconnected and try again.
-              schedule_reconnect_if_eligible(new_state, pubkey, 0)
-          end
-
-        {:noreply, new_state}
+        {:noreply, on_connection_down(%{state | monitors: monitors}, pubkey)}
     end
   end
 
@@ -227,35 +209,12 @@ defmodule PeerNet.Registry do
   def handle_info({:reconnect_attempt, pubkey, attempt}, state) do
     case Map.get(state.peers, pubkey) do
       %{status: :connected} ->
-        # Already reconnected by some other path (e.g. discovery
-        # event re-fired). Drop this scheduled attempt.
+        # Already reconnected via some other path (e.g. discovery
+        # re-fired). Drop this scheduled attempt.
         {:noreply, state}
 
       %{last_address: %{} = address} = entry ->
-        if Trust.trusted?(state.trust, pubkey) do
-          new_state =
-            state
-            |> put_in([:peers, pubkey], %{entry | status: :reconnecting})
-            |> dial_peer(pubkey, address)
-
-          # If dial_peer didn't take us to :connecting (e.g. transport
-          # error), schedule another attempt with backoff.
-          new_state =
-            case Map.get(new_state.peers, pubkey) do
-              %{status: :connecting} ->
-                # Dial in flight; the Connection's eventual register
-                # or DOWN will drive subsequent state changes.
-                new_state
-
-              _ ->
-                schedule_reconnect_if_eligible(new_state, pubkey, attempt + 1)
-            end
-
-          {:noreply, new_state}
-        else
-          # Untrusted now — give up.
-          {:noreply, state}
-        end
+        {:noreply, attempt_reconnect(state, pubkey, entry, address, attempt)}
 
       _ ->
         # No address to dial; wait for discovery to give us one.
@@ -266,6 +225,48 @@ defmodule PeerNet.Registry do
   def handle_info(_other, state), do: {:noreply, state}
 
   # ── Internal ────────────────────────────────────────────────────────
+
+  # If the peer is still trusted, perform the dial and either let the
+  # in-flight :connecting state ride or queue another backoff attempt.
+  defp attempt_reconnect(state, pubkey, entry, address, attempt) do
+    if Trust.trusted?(state.trust, pubkey) do
+      state
+      |> put_in([:peers, pubkey], %{entry | status: :reconnecting})
+      |> dial_peer(pubkey, address)
+      |> reschedule_if_dial_failed(pubkey, attempt)
+    else
+      state
+    end
+  end
+
+  defp reschedule_if_dial_failed(state, pubkey, attempt) do
+    case Map.get(state.peers, pubkey) do
+      %{status: :connecting} ->
+        # Dial in flight; Connection's eventual register or DOWN
+        # drives subsequent state changes.
+        state
+
+      _ ->
+        schedule_reconnect_if_eligible(state, pubkey, attempt + 1)
+    end
+  end
+
+  # Mark the peer as disconnected and (if eligible) schedule a redial.
+  # Connection termination is a normal lifecycle event — we don't drop
+  # the peer record itself, just clear the conn pid and try again.
+  defp on_connection_down(state, pubkey) do
+    case Map.get(state.peers, pubkey) do
+      nil ->
+        state
+
+      entry ->
+        entry = %{entry | conn_pid: nil, status: :disconnected}
+
+        state
+        |> put_in([:peers, pubkey], entry)
+        |> schedule_reconnect_if_eligible(pubkey, 0)
+    end
+  end
 
   defp blank_entry(pubkey) do
     %{
@@ -311,23 +312,7 @@ defmodule PeerNet.Registry do
            expected_peer: pubkey
          ) do
       {:ok, conn_pid} ->
-        case :gen_tcp.connect(ip, port, [:binary, packet: :raw, active: false]) do
-          {:ok, socket} ->
-            :ok = :gen_tcp.controlling_process(socket, conn_pid)
-            Connection.hand_off_socket(conn_pid, socket)
-
-            entry = state.peers[pubkey]
-            put_in(state.peers[pubkey], %{entry | status: :connecting})
-
-          {:error, reason} ->
-            Logger.warning(
-              "[PeerNet] dial failed for #{inspect(pubkey)} at #{inspect(ip)}:#{port}: #{inspect(reason)}"
-            )
-
-            # Stop the orphan connection process.
-            if Process.alive?(conn_pid), do: GenServer.stop(conn_pid, :normal)
-            state
-        end
+        connect_socket(state, pubkey, ip, port, conn_pid)
 
       {:error, reason} ->
         Logger.warning("[PeerNet] failed to spawn outbound connection: #{inspect(reason)}")
@@ -335,27 +320,52 @@ defmodule PeerNet.Registry do
     end
   end
 
+  defp connect_socket(state, pubkey, ip, port, conn_pid) do
+    case :gen_tcp.connect(ip, port, [:binary, packet: :raw, active: false]) do
+      {:ok, socket} ->
+        :ok = :gen_tcp.controlling_process(socket, conn_pid)
+        Connection.hand_off_socket(conn_pid, socket)
+
+        entry = state.peers[pubkey]
+        put_in(state.peers[pubkey], %{entry | status: :connecting})
+
+      {:error, reason} ->
+        Logger.warning(
+          "[PeerNet] dial failed for #{inspect(pubkey)} at #{inspect(ip)}:#{port}: #{inspect(reason)}"
+        )
+
+        # Stop the orphan connection process.
+        if Process.alive?(conn_pid), do: GenServer.stop(conn_pid, :normal)
+        state
+    end
+  end
+
   defp drop_existing_conn(state, pubkey) do
     case Map.get(state.peers, pubkey) do
       %{conn_pid: old_pid} = entry when is_pid(old_pid) ->
-        # Tear down old monitors for this pubkey.
-        new_monitors =
-          Enum.reduce(state.monitors, %{}, fn {ref, pk}, acc ->
-            if pk == pubkey do
-              Process.demonitor(ref, [:flush])
-              acc
-            else
-              Map.put(acc, ref, pk)
-            end
-          end)
-
+        new_monitors = drop_monitors_for(state.monitors, pubkey)
         if Process.alive?(old_pid), do: send(old_pid, :superseded)
 
-        %{state | monitors: new_monitors, peers: Map.put(state.peers, pubkey, %{entry | conn_pid: nil})}
+        %{
+          state
+          | monitors: new_monitors,
+            peers: Map.put(state.peers, pubkey, %{entry | conn_pid: nil})
+        }
 
       _ ->
         state
     end
+  end
+
+  defp drop_monitors_for(monitors, pubkey) do
+    Enum.reduce(monitors, %{}, fn {ref, pk}, acc ->
+      if pk == pubkey do
+        Process.demonitor(ref, [:flush])
+        acc
+      else
+        Map.put(acc, ref, pk)
+      end
+    end)
   end
 
   defp status_after_loss(:connected), do: :connected

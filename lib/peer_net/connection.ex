@@ -243,30 +243,31 @@ defmodule PeerNet.Connection do
     end
   end
 
+  defp handle_inbound_bytes(%{handshake: %{phase: :authenticated}} = state) do
+    consume_envelopes(state)
+  end
+
   defp handle_inbound_bytes(state) do
-    case state.handshake.phase do
-      :authenticated ->
-        consume_envelopes(state)
+    case Handshake.step(state.handshake, state.buffer) do
+      {:error, reason, _side} ->
+        Logger.info("[PeerNet] handshake failed: #{inspect(reason)}")
+        {:stop, :normal, state}
 
-      _ ->
-        case Handshake.step(state.handshake, state.buffer) do
-          {:error, reason, _side} ->
-            Logger.info("[PeerNet] handshake failed: #{inspect(reason)}")
-            {:stop, :normal, state}
-
-          {:ok, new_hs, out_bytes} ->
-            if out_bytes != <<>>, do: :ok = :gen_tcp.send(state.socket, out_bytes)
-
-            new_state = %{state | handshake: new_hs, buffer: new_hs.inbox}
-            new_state = %{new_state | handshake: %{new_state.handshake | inbox: <<>>}}
-
-            new_state =
-              if new_hs.phase == :authenticated, do: drive_handshake(new_state), else: new_state
-
-            :ok = :inet.setopts(state.socket, active: :once)
-            {:noreply, new_state}
-        end
+      {:ok, new_hs, out_bytes} ->
+        advance_handshake(state, new_hs, out_bytes)
     end
+  end
+
+  defp advance_handshake(state, new_hs, out_bytes) do
+    if out_bytes != <<>>, do: :ok = :gen_tcp.send(state.socket, out_bytes)
+
+    new_state = %{state | handshake: %{new_hs | inbox: <<>>}, buffer: new_hs.inbox}
+
+    new_state =
+      if new_hs.phase == :authenticated, do: drive_handshake(new_state), else: new_state
+
+    :ok = :inet.setopts(state.socket, active: :once)
+    {:noreply, new_state}
   end
 
   defp consume_envelopes(state) do
@@ -280,23 +281,31 @@ defmodule PeerNet.Connection do
         {:stop, :normal, state}
 
       {:ok, frame_body, rest} ->
-        case Channel.decrypt(state.handshake.rx, frame_body) do
-          {:ok, envelope, new_rx} ->
-            new_state = %{
-              state
-              | buffer: rest,
-                handshake: %{state.handshake | rx: new_rx}
-            }
+        consume_one_frame(state, frame_body, rest)
+    end
+  end
 
-            case dispatch_envelope(envelope, new_state) do
-              {:ok, ns} -> consume_envelopes(ns)
-              {:stop, ns} -> {:stop, :normal, ns}
-            end
+  defp consume_one_frame(state, frame_body, rest) do
+    case Channel.decrypt(state.handshake.rx, frame_body) do
+      {:ok, envelope, new_rx} ->
+        new_state = %{
+          state
+          | buffer: rest,
+            handshake: %{state.handshake | rx: new_rx}
+        }
 
-          {:error, reason, _} ->
-            Logger.info("[PeerNet] AEAD decrypt failed: #{inspect(reason)}")
-            {:stop, :normal, state}
-        end
+        dispatch_or_recurse(envelope, new_state)
+
+      {:error, reason, _} ->
+        Logger.info("[PeerNet] AEAD decrypt failed: #{inspect(reason)}")
+        {:stop, :normal, state}
+    end
+  end
+
+  defp dispatch_or_recurse(envelope, state) do
+    case dispatch_envelope(envelope, state) do
+      {:ok, ns} -> consume_envelopes(ns)
+      {:stop, ns} -> {:stop, :normal, ns}
     end
   end
 

@@ -8,6 +8,8 @@ this is the human/admin loop.
 - [ ] `mix test` is green (3 consecutive runs — there are timing-
       sensitive Liveness/Reconnect tests, run a few times to catch
       timing flakes if any).
+- [ ] `mix credo --strict` reports zero issues.
+- [ ] `mix compile --warnings-as-errors` is clean.
 - [ ] `mix docs` builds without warnings; `doc/index.html` looks
       sensible.
 - [ ] `CHANGELOG.md` is up to date — every meaningful change since

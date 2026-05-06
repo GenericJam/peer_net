@@ -12,7 +12,7 @@ defmodule PeerNet.FrameTest do
     end
 
     test "encodes a tagged tuple (the call shape)" do
-      payload = {:call, 12345, :chat, %{text: "hi"}}
+      payload = {:call, 12_345, :chat, %{text: "hi"}}
       encoded = Frame.encode(payload)
       assert {:ok, ^payload, ""} = Frame.decode(encoded)
     end

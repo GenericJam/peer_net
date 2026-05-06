@@ -45,7 +45,7 @@ defmodule PeerNet.Discovery.UDPTest do
          [
            registry: me,
            identity: identity,
-           listen_port: 14040,
+           listen_port: 14_040,
            interval_ms: 50,
            transport: MockTransport,
            peer_net_port: 7100
